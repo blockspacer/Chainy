@@ -96,7 +96,13 @@ namespace chainy
 		bool Close();
 
 		bool OnSourceDirectoryUpdate();
-		bool SendReply (int32_t token, const void* data, size_t length);
+		bool SendReply (int32_t token, const void* data, size_t length) {
+			return SendReply (token, data, length, false);
+		}
+		bool SendReplyAndClose (int32_t token, const void* data, size_t length) {
+			return SendReply (token, data, length, true);
+		}
+		bool SendReply (int32_t token, const void* data, size_t length, bool and_close);
 
 /* RSSL client socket */
 		RsslChannel*const handle() const {

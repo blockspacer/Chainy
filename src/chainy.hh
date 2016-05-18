@@ -41,6 +41,7 @@ namespace chainy
                 explicit subscription_stream_t ()
 			: snapshot_handle (0),
 			  cow_handle (nullptr),
+			  index (0),
 			  request_received (0)
                 {
                 }
@@ -49,6 +50,11 @@ namespace chainy
 		std::atomic<std::uintptr_t> snapshot_handle;
 /* Cache entry for when source entry has updated. */
 		RsslPayloadEntryHandle cow_handle;
+
+/* A runtime generated link rather than original subscription. */
+		unsigned index;
+		std::vector<std::shared_ptr<subscription_stream_t>> links;
+		std::vector<std::string> rics;
 
 /* Performance counters */
 		uint32_t request_received;
@@ -91,8 +97,8 @@ namespace chainy
 		void Stop();
 
 		bool CheckTrigger (const uint8_t rwf_major_version, const uint8_t rwf_minor_version, RsslMsg* msg);
-		bool WriteRaw (uint16_t rwf_version, int32_t token, uint16_t service_id, const chromium::StringPiece& item_name, const chromium::StringPiece& dacs_lock, const std::vector<std::string>& symbol_list, void* data, size_t* length);
-		bool WriteRaw (uint16_t rwf_version, int32_t token, uint16_t service_id, const chromium::StringPiece& item_name, const chromium::StringPiece& dacs_lock, RsslPayloadEntryHandle handle, void* data, size_t* length);
+		bool WriteRaw (uint16_t rwf_version, int32_t token, uint16_t service_id, const chromium::StringPiece& item_name, const chromium::StringPiece& dacs_lock, unsigned part_number, bool is_complete, const std::vector<std::string>& symbol_list, void* data, size_t* length);
+		bool WriteRaw (uint16_t rwf_version, int32_t token, uint16_t service_id, const chromium::StringPiece& item_name, const chromium::StringPiece& dacs_lock, unsigned part_number, bool is_complete, RsslPayloadEntryHandle handle, void* data, size_t* length);
 
 /* Mainloop procesing threads. */
 		std::unique_ptr<boost::thread> consumer_thread_, provider_thread_;

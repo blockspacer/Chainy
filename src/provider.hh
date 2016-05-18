@@ -111,7 +111,13 @@ namespace chainy
 		}
 
 		static bool WriteRawClose (uint16_t rwf_version, int32_t token, uint16_t service_id, uint8_t model_type, const chromium::StringPiece& item_name, bool use_attribinfo_in_updates, uint8_t stream_state, uint8_t status_code, const chromium::StringPiece& status_text, void* data, size_t* length);
-		bool SendReply (RsslChannel*const handle, int32_t token, const void* buf, size_t length);
+		bool SendReply (RsslChannel*const handle, int32_t token, const void* buf, size_t length) {
+			return SendReply (handle, token, buf, length, false);
+		}
+		bool SendReplyAndClose (RsslChannel*const handle, int32_t token, const void* buf, size_t length) {
+			return SendReply (handle, token, buf, length, true);
+		}
+		bool SendReply (RsslChannel*const handle, int32_t token, const void* buf, size_t length, bool and_close);
 
 // ProviderDelegate methods:
 		virtual void CreateInfo(ProviderInfo* info) override;

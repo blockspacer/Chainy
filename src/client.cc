@@ -47,6 +47,23 @@ chainy::client_t::client_t (
 	std::ostringstream ss;
 	ss << handle_ << ':';
 	prefix_.assign (ss.str());
+
+/* Enable RSSL tracing */
+	if (false) {
+		RsslTraceOptions trace_options;
+		rsslClearTraceOptions (&trace_options);
+		RsslError rssl_err;
+		RsslRet rc;
+		trace_options.traceFlags = RSSL_TRACE_TO_STDOUT | RSSL_TRACE_READ | RSSL_TRACE_WRITE;
+		rc = rsslIoctl (handle_, RSSL_TRACE, reinterpret_cast<void*> (&trace_options), &rssl_err);
+		if (RSSL_RET_SUCCESS != rc) {
+			LOG(ERROR) << prefix_ << "rsslIoctl: { "
+				  "\"returnCode\": " << static_cast<signed> (rc) << ""
+				", \"enumeration\": \"" << rsslRetCodeToString (rc) << "\""
+				", \"text\": \"" << rsslRetCodeInfo (rc) << "\""
+				" }";
+		}
+	}
 }
 
 chainy::client_t::~client_t()
@@ -930,15 +947,18 @@ bool
 chainy::client_t::SendReply (
 	int32_t request_token,
 	const void* data,
-	size_t length
+	size_t length,
+	bool and_close
 	)
 {
 	RsslBuffer* buf;
 	RsslError rssl_err;
 	DCHECK(length <= MAX_MSG_SIZE);
+	if (and_close) {
 /* Drop response if token already canceled */
-	if (0 == tokens_.erase (request_token))
-		return true;
+		if (0 == tokens_.erase (request_token))
+			return true;
+	}
 /* Copy into RSSL channel buffer pool */
 	buf = rsslGetBuffer (handle_, MAX_MSG_SIZE, RSSL_FALSE /* not packed */, &rssl_err);
 	if (nullptr == buf) {

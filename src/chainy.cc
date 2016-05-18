@@ -182,6 +182,7 @@ chainy::chainy_t::Initialize ()
 			auto stream = std::make_shared<subscription_stream_t> ();
 			if (!(bool)stream)
 				return false;
+			stream->links.push_back (stream);
 			if (consumer_->CreateItemStream (instrument.c_str(), stream))
 				streams_.insert (std::make_pair (instrument, stream));
 			else
@@ -349,14 +350,17 @@ chainy::chainy_t::OnWrite (
 	)
 {
 	DVLOG(3) << "OnWrite";
-	auto stream = static_cast<subscription_stream_t*> (item_stream.get());
+	auto stream = std::static_pointer_cast<subscription_stream_t> (item_stream);
 	std::vector<std::string> v;
+	bool is_complete = false;
 	RsslDecodeIterator it;
 	RsslFieldList field_list;
 	RsslFieldEntry field_entry;
 	RsslBuffer rssl_buffer;
 	RsslCacheError rssl_cache_err;
 	RsslRet rc;
+
+	std::shared_ptr<subscription_stream_t> parent = stream->links.front();
 
 	rsslClearDecodeIterator (&it);
 	rsslCacheErrorClear (&rssl_cache_err);
@@ -423,7 +427,7 @@ chainy::chainy_t::OnWrite (
 		case 813:
 			rc = rsslDecodeBuffer (&it, &rssl_buffer);
 			if (RSSL_RET_BLANK_DATA == rc || 0 == rssl_buffer.length) {
-				LOG(INFO) << field_entry.fieldId << " = <blank>";
+				VLOG(1) << field_entry.fieldId << " = <blank>";
 				continue;
 			}
 			if (RSSL_RET_SUCCESS != rc) {
@@ -434,9 +438,46 @@ chainy::chainy_t::OnWrite (
 					" }";
 				return false;
 			}
-			LOG(INFO) << field_entry.fieldId << " = \"" << std::string (rssl_buffer.data, rssl_buffer.length) << "\"";
+			VLOG(1) << field_entry.fieldId << " = \"" << std::string (rssl_buffer.data, rssl_buffer.length) << "\"";
 			v.emplace_back (rssl_buffer.data, rssl_buffer.length);
 			break;
+
+/* next link pointers */
+		case 238:
+		case 815:
+			rc = rsslDecodeBuffer (&it, &rssl_buffer);
+			if (RSSL_RET_BLANK_DATA == rc || 0 == rssl_buffer.length) {
+				VLOG(1) << "<next link> = <blank>";
+				continue;
+			}
+			if (RSSL_RET_SUCCESS != rc) {
+				LOG(ERROR) << "rsslDecodeBuffer: { "
+					  "\"returnCode\": " << static_cast<signed> (rc) << ""
+					", \"enumeration\": \"" << rsslRetCodeToString (rc) << "\""
+					", \"text\": \"" << rsslRetCodeInfo (rc) << "\""
+					" }";
+				return false;
+			}
+			VLOG(1) << "<next link> = \"" << std::string (rssl_buffer.data, rssl_buffer.length) << "\"";
+			if (0 == rssl_buffer.length) {
+				is_complete = true;
+/* destroy all following links */
+				parent->links.resize (1 + stream->index);
+			} else {
+				std::string link_name (rssl_buffer.data, rssl_buffer.length);
+				auto link_stream = std::make_shared<subscription_stream_t> ();
+				if (!(bool)link_stream)
+					return false;
+				link_stream->links.push_back (parent);
+				link_stream->index = 1 + stream->index;
+				if (consumer_->CreateItemStream (link_name.c_str(), link_stream)) {
+					if (link_stream->index == parent->links.size())
+						parent->links.resize (1 + link_stream->index);
+					parent->links[link_stream->index] = link_stream;
+				} else {
+					LOG(WARNING) << "Cannot create stream for \"" << link_name << "\".";
+				}
+			}
 
 		default:
 			break;
@@ -445,10 +486,11 @@ chainy::chainy_t::OnWrite (
 
 	consumer_rssl_length_ = sizeof (consumer_rssl_buf_);
 	if (!WriteRaw ((rwf_major_version * 256) + rwf_minor_version,
-			item_stream->token,
+			parent->token,
 			consumer_->service_id(),
-			item_stream->item_name,
+			parent->item_name,
 			nullptr,
+			stream->index, is_complete,
 			v,
 			consumer_rssl_buf_,
 			&consumer_rssl_length_))
@@ -548,37 +590,55 @@ chainy::chainy_t::OnRequest (
 		{
 			return false;
 		}
-		goto send_reply;
-	}
-
-	if (!WriteRaw (rwf_version,
-			token,
-			service_id,
-			item_name,
-			nullptr,
-			(RsslPayloadEntryHandle)(void*)search->second->snapshot_handle.load(),
-			provider_rssl_buf_,
-			&provider_rssl_length_))
-	{
-/* Extremely unlikely situation that writing the response fails but writing a close will not */
-		if (!provider_t::WriteRawClose (
-				rwf_version,
-				token,
-				service_id,
-				RSSL_DMT_MARKET_PRICE,
-				item_name,
-				use_attribinfo_in_updates,
-				RSSL_STREAM_CLOSED_RECOVER, RSSL_SC_ERROR, kErrorInternal,
-				provider_rssl_buf_,
-				&provider_rssl_length_
-				))
+		if (!provider_->SendReplyAndClose (reinterpret_cast<RsslChannel*> (handle), token, provider_rssl_buf_, provider_rssl_length_))
 		{
 			return false;
 		}
-		goto send_reply;
 	}
-send_reply:
-	return provider_->SendReply (reinterpret_cast<RsslChannel*> (handle), token, provider_rssl_buf_, provider_rssl_length_);
+
+	unsigned part_number = 0;
+	for (auto it = search->second->links.begin();
+		it != search->second->links.end();
+		++it)
+	{
+		auto stream = *it;
+		bool is_complete = it == std::prev (search->second->links.end());
+
+/* Reset message buffer */
+		provider_rssl_length_ = sizeof (provider_rssl_buf_);
+		if (!WriteRaw (rwf_version,
+				token,
+				service_id,
+				item_name,
+				nullptr,
+				part_number++,
+				is_complete,
+				(RsslPayloadEntryHandle)(void*)stream->snapshot_handle.load(),
+				provider_rssl_buf_,
+				&provider_rssl_length_))
+		{
+/* Extremely unlikely situation that writing the response fails but writing a close will not */
+			if (!provider_t::WriteRawClose (
+					rwf_version,
+					token,
+					service_id,
+					RSSL_DMT_MARKET_PRICE,
+					item_name,
+					use_attribinfo_in_updates,
+					RSSL_STREAM_CLOSED_RECOVER, RSSL_SC_ERROR, kErrorInternal,
+					provider_rssl_buf_,
+					&provider_rssl_length_
+					))
+			{
+				return false;
+			}
+		}
+		if (!provider_->SendReply (reinterpret_cast<RsslChannel*> (handle), token, provider_rssl_buf_, provider_rssl_length_, is_complete))
+		{
+			return false;
+		}
+	}
+	return true;
 }
 
 bool
@@ -587,7 +647,9 @@ chainy::chainy_t::WriteRaw (
 	int32_t token,
 	uint16_t service_id,
 	const chromium::StringPiece& item_name,
-	const chromium::StringPiece& dacs_lock,	    /* ignore DACS lock */
+	const chromium::StringPiece& dacs_lock,		/* ignore DACS lock */
+	unsigned part_number,				/* 0 indicates initial part */
+	bool is_complete,				/* mark refresh-complete */
 	const std::vector<std::string>& symbol_list,
 	void* data,
 	size_t* length
@@ -611,9 +673,13 @@ chainy::chainy_t::WriteRaw (
 /* 7.4.8.4 Set response type, response type number, and indication mask. */
 	response.msgBase.msgClass = RSSL_MC_REFRESH;
 /* for snapshot images do not cache */
-	response.flags = RSSL_RFMF_SOLICITED	    |
-			 RSSL_RFMF_REFRESH_COMPLETE |
-			 RSSL_RFMF_CLEAR_CACHE;
+	response.flags = RSSL_RFMF_SOLICITED | RSSL_RFMF_HAS_PART_NUM;
+	if (0 == part_number)
+		response.flags |= RSSL_RFMF_CLEAR_CACHE;
+	if (is_complete)
+		response.flags |= RSSL_RFMF_REFRESH_COMPLETE;
+	response.partNum = part_number;
+
 /* RDM map for a symbol list. */
 	response.msgBase.containerType = RSSL_DT_MAP;
 
@@ -732,7 +798,9 @@ chainy::chainy_t::WriteRaw (
 	int32_t token,
 	uint16_t service_id,
 	const chromium::StringPiece& item_name,
-	const chromium::StringPiece& dacs_lock,	    /* ignore DACS lock */
+	const chromium::StringPiece& dacs_lock,		/* ignore DACS lock */
+	unsigned part_number,				/* 0 indicates initial part */
+	bool is_complete,				/* mark refresh-complete */
 	const RsslPayloadEntryHandle payload_entry_handle,
 	void* data,
 	size_t* length
@@ -756,9 +824,13 @@ chainy::chainy_t::WriteRaw (
 /* 7.4.8.4 Set response type, response type number, and indication mask. */
 	response.msgBase.msgClass = RSSL_MC_REFRESH;
 /* for snapshot images do not cache */
-	response.flags = RSSL_RFMF_SOLICITED	    |
-			 RSSL_RFMF_REFRESH_COMPLETE |
-			 RSSL_RFMF_CLEAR_CACHE;
+	response.flags = RSSL_RFMF_SOLICITED | RSSL_RFMF_HAS_PART_NUM;
+	if (0 == part_number)   
+		response.flags |= RSSL_RFMF_CLEAR_CACHE;
+	if (is_complete)        
+		response.flags |= RSSL_RFMF_REFRESH_COMPLETE;
+	response.partNum = part_number;
+
 /* RDM map for a symbol list. */
 	response.msgBase.containerType = RSSL_DT_MAP;
 

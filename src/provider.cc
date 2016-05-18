@@ -429,7 +429,8 @@ chainy::provider_t::SendReply (
 	RsslChannel*const handle,
 	int32_t token,
 	const void* data,
-	size_t length
+	size_t length,
+	bool and_close
 	)
 {
 	boost::shared_lock<boost::shared_mutex> lock (clients_lock_);
@@ -437,7 +438,7 @@ chainy::provider_t::SendReply (
 	lock.unlock();
 /* client may have disconnected before reply is available. */
 	if (clients_.end() != client)
-		return client->second->SendReply (token, data, length);
+		return client->second->SendReply (token, data, length, and_close);
 	else
 		return false;
 }
